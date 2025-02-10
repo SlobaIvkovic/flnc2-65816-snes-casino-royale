@@ -1,0 +1,62 @@
+This patch changes the template from a 32kb setup to 32+32kb.
+One 32kb bank for code, one for RODATA.
+
+diff --git a/snes/cc65-template/crt0.s b/snes/cc65-template/crt0.s
+index 1a1cb8f..2ac7673 100644
+--- a/snes/cc65-template/crt0.s
++++ b/snes/cc65-template/crt0.s
+@@ -278,9 +278,9 @@ clearram:
+ 	lda #$11
+ 	sta BLENDMAIN
+ 
+-	; set the data bank to our program bank
+-	pea _main>>8
+-	plb
++	; set the data bank to our rodata bank
++	lda #$83
++	pha
+ 	plb
+ 
+ 	; Unlike on the NES, we don't have to wait 2 vblanks to do
+diff --git a/snes/cc65-template/lorom.cfg b/snes/cc65-template/lorom.cfg
+index af674df..a801a3c 100644
+--- a/snes/cc65-template/lorom.cfg
++++ b/snes/cc65-template/lorom.cfg
+@@ -29,20 +29,13 @@ MEMORY {
+ SEGMENTS {
+   # Read-only areas for main CPU
+   CODE:       load = ROM0;
+-  RODATA:     load = ROM0;
++  RODATA:     load = ROM3;
+   SNESHEADER: load = ROM0, start = $80FFC0;
+-  CODE1:      load = ROM1, optional=yes;
+   RODATA1:    load = ROM1, optional=yes;
+-  CODE2:      load = ROM2, optional=yes;
+   RODATA2:    load = ROM2, optional=yes;
+-  CODE3:      load = ROM3, optional=yes;
+-  RODATA3:    load = ROM3, optional=yes;
+-  CODE4:      load = ROM4, optional=yes;
+-  RODATA4:    load = ROM4, optional=yes;
+-  CODE5:      load = ROM5, optional=yes;
+-  RODATA5:    load = ROM5, optional=yes;
+-  CODE6:      load = ROM6, optional=yes;
+-  RODATA6:    load = ROM6, optional=yes;
++  RODATA3:    load = ROM4, optional=yes;
++  RODATA4:    load = ROM5, optional=yes;
++  RODATA5:    load = ROM6, optional=yes;
+   CHR0:       load = ROM7, optional=yes;
+ 
+   # Areas for variables for main CPU
+diff --git a/snes/cc65-template/neslib.s b/snes/cc65-template/neslib.s
+index bd38714..1cbe9ef 100644
+--- a/snes/cc65-template/neslib.s
++++ b/snes/cc65-template/neslib.s
+@@ -1304,7 +1304,7 @@ memcpy:
+ 	ldx SRC
+ 	ldy DST
+ ; Note the fixed bank!
+-	mvn #$80, #$80
++	mvn #$83, #$83
+ 
+ 	setaxy8
+ 	plb

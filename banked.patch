@@ -1,0 +1,260 @@
+This patch changes the template from a 32kb setup to one that can place
+code in any bank. One 32kb bank is dedicated for RODATA.
+
+diff --git a/snes/cc65-template/crt0.s b/snes/cc65-template/crt0.s
+index 1a1cb8f..5ff2e93 100644
+--- a/snes/cc65-template/crt0.s
++++ b/snes/cc65-template/crt0.s
+@@ -4,8 +4,9 @@
+ .import _main, nmi_handler, __ZEROPAGE_RUN__, __BSS_SIZE__, __BSS_START__
+ .import spc_code, _spc_music_load_adr, _spc_stream_enable, _spc_dstaddr, _spc_size
+ .import spc_code2, _spc_load_data, _spc_command
++.import __CODE_SIZE__, __CODE_RUN__, __CODE_LOAD__
+ .exportzp RAND_SEED, _oam_off
+-.importzp PPU_MASK_VAR, _sneslib_ptr
++.importzp PPU_MASK_VAR, _sneslib_ptr, _curbank
+ .smart
+ 
+ .include "snes.sinc"
+@@ -46,7 +47,7 @@ map_mode				= $00FFD5
+ ; For advanced users: Long stretches of STZ are a useful place to
+ ; shuffle code when watermarking your binary.
+ 
+-.segment "CODE"
++.segment "BOOTCODE"
+ .proc resetstub
+ 	sei								 ; turn off IRQs
+ 	clc
+@@ -68,7 +69,7 @@ _oam_off: .res 2
+ 
+ OAM_BUF:	.res 512+32
+ 
+-.segment "CODE"
++.segment "BOOTCODE"
+ .proc reset_fastrom
+ 	rep #$30				 ; 16-bit AXY
+ 	ldx #LAST_STACK_ADDR
+@@ -187,6 +188,37 @@ clearram:
+ 	lda #(__BSS_START__+__BSS_SIZE__)
+ 	sta sp
+ 
++	setaxy8
++
++	; copy our CODE bank to BSS
++	lda #<__CODE_RUN__
++	sta WMADDL
++	lda #>__CODE_RUN__
++	sta WMADDM
++	stz WMADDH
++
++	lda #(DMA_00) ; write from cpu to io, increasing, in 8bit units
++	sta DMAMODE
++	lda #$80 ; to ram
++	sta DMAPPUREG
++	lda #<__CODE_LOAD__
++	sta DMAADDR
++	lda #>__CODE_LOAD__
++	sta DMAADDRHI
++	lda #$80 ; from the default lorom bank (with access to low ram)
++	sta DMAADDRBANK
++	lda #<__CODE_SIZE__
++	sta DMALEN
++	lda #>__CODE_SIZE__
++	sta DMALENHI
++	lda #1
++	sta MDMAEN
++
++	lda #$80
++	sta _curbank
++
++	setaxy16
++
+ 	; sound init
+ 	lda f:spc_code
+ 	sta ptr2 ; size
+@@ -278,9 +310,9 @@ clearram:
+ 	lda #$11
+ 	sta BLENDMAIN
+ 
+-	; set the data bank to our program bank
+-	pea _main>>8
+-	plb
++	; set the data bank to our rodata bank
++	lda #$83
++	pha
+ 	plb
+ 
+ 	; Unlike on the NES, we don't have to wait 2 vblanks to do
+diff --git a/snes/cc65-template/lorom.cfg b/snes/cc65-template/lorom.cfg
+index af674df..a1aa866 100644
+--- a/snes/cc65-template/lorom.cfg
++++ b/snes/cc65-template/lorom.cfg
+@@ -28,21 +28,20 @@ MEMORY {
+ # Logical areas code/data can be put into.
+ SEGMENTS {
+   # Read-only areas for main CPU
+-  CODE:       load = ROM0;
+-  RODATA:     load = ROM0;
++  CODE:       load = ROM0, run = BSS, define = yes;
++  BOOTCODE:   load = ROM0;
++  RODATA:     load = ROM3;
+   SNESHEADER: load = ROM0, start = $80FFC0;
+   CODE1:      load = ROM1, optional=yes;
+   RODATA1:    load = ROM1, optional=yes;
+   CODE2:      load = ROM2, optional=yes;
+   RODATA2:    load = ROM2, optional=yes;
+-  CODE3:      load = ROM3, optional=yes;
+-  RODATA3:    load = ROM3, optional=yes;
+-  CODE4:      load = ROM4, optional=yes;
+-  RODATA4:    load = ROM4, optional=yes;
+-  CODE5:      load = ROM5, optional=yes;
+-  RODATA5:    load = ROM5, optional=yes;
+-  CODE6:      load = ROM6, optional=yes;
+-  RODATA6:    load = ROM6, optional=yes;
++  CODE3:      load = ROM4, optional=yes;
++  RODATA3:    load = ROM4, optional=yes;
++  CODE4:      load = ROM5, optional=yes;
++  RODATA4:    load = ROM5, optional=yes;
++  CODE5:      load = ROM6, optional=yes;
++  RODATA5:    load = ROM6, optional=yes;
+   CHR0:       load = ROM7, optional=yes;
+ 
+   # Areas for variables for main CPU
+diff --git a/snes/cc65-template/main.c b/snes/cc65-template/main.c
+index ab417a2..0129cc1 100644
+--- a/snes/cc65-template/main.c
++++ b/snes/cc65-template/main.c
+@@ -1,6 +1,11 @@
+ #include "neslib.h"
+ #include "snesgss.h"
+ 
++void trampoline(void);
++#pragma wrapped-call(push, trampoline, 0x82)
++void sayhi(void); // This function is in bank 0x82
++#pragma wrapped-call(pop)
++
+ void str(const char *in) {
+ 	static unsigned char i;
+ 	for (i = 0; in[i]; i++)
+@@ -11,6 +16,14 @@ extern char music1[];
+ extern const unsigned char font_bank;
+ extern const unsigned char font_chr[];
+ 
++#pragma code-name(push, "CODE2")
++void sayhi() {
++	vram_adr(NTADR_A(5, 14));
++	str("HI FROM 0X82");
++}
++#pragma code-name(pop)
++
++// Main is in CODE, aka RAM here. Could put it elsewhere too
+ void main() {
+ 
+ 	unsigned char coord;
+@@ -30,6 +43,8 @@ void main() {
+ 	vram_adr(NTADR_A(5, 10));
+ 	str("HELLO WORLD");
+ 
++	sayhi();
++
+ 	pal_col(0, RGB24_TO_VDPCOLOR(0x005000));
+ 	pal_col(1, RGB24_TO_VDPCOLOR(0x3fa03f));
+ 
+diff --git a/snes/cc65-template/neslib.s b/snes/cc65-template/neslib.s
+index bd38714..1cbe9ef 100644
+--- a/snes/cc65-template/neslib.s
++++ b/snes/cc65-template/neslib.s
+@@ -1304,7 +1304,7 @@ memcpy:
+ 	ldx SRC
+ 	ldy DST
+ ; Note the fixed bank!
+-	mvn #$80, #$80
++	mvn #$83, #$83
+ 
+ 	setaxy8
+ 	plb
+diff --git a/snes/cc65-template/trampoline.s b/snes/cc65-template/trampoline.s
+new file mode 100644
+index 0000000..d1c5030
+--- /dev/null
++++ b/snes/cc65-template/trampoline.s
+@@ -0,0 +1,66 @@
++;
++; File generated by cc65 v 2.15 - Git 24c2da9
++;
++	.fopt		compiler,"cc65 v 2.15 - Git 24c2da9"
++	.setcpu		"65816"
++	.smart		on
++	.autoimport	on
++	.case		on
++	.debuginfo	off
++	.importzp	sp, sreg, regsave, regbank
++	.importzp	tmp1, tmp2, tmp3, tmp4, ptr1, ptr2, ptr3, ptr4
++	.macpack	longbranch
++	.exportzp	_curbank
++	.importzp	_sneslib_ptr
++	.export		_trampoline
++
++; ---------------------------------------------------------------
++; void __near__ trampoline (void)
++; ---------------------------------------------------------------
++
++.segment	"ZEROPAGE"
++_curbank:	.res 1
++
++.segment	"CODE"
++
++.proc	_trampoline: near
++
++	ldy	_curbank
++	cpy	tmp4
++	bne	jump
++	jmp	(ptr4)
++
++; a bankswitch is needed
++jump:
++	phy
++; the current bank is now on stack
++
++	ldy	tmp4
++	sty	_sneslib_ptr+2
++	sty	_curbank
++
++	ldy	#<here
++	sty	_sneslib_ptr
++	ldy	#>here
++	sty	_sneslib_ptr+1
++	jml	[_sneslib_ptr] ; jump to ourself, but in a different bank
++
++here:
++	jsr	callptr4
++
++; restore the old bank
++	ply
++
++	sty	_sneslib_ptr+2
++	sty	_curbank
++
++	ldy	#<done
++	sty	_sneslib_ptr
++	ldy	#>done
++	sty	_sneslib_ptr+1
++	jml	[_sneslib_ptr] ; jump to ourself, but in a different bank
++done:
++	rts
++
++.endproc
++
+diff --git a/snes/cc65-template/snesheader.s b/snes/cc65-template/snesheader.s
+index 87140c9..67deb14 100644
+--- a/snes/cc65-template/snesheader.s
++++ b/snes/cc65-template/snesheader.s
+@@ -77,7 +77,7 @@ romname:
+ 	.addr ecop_handler, $FFFF, eabort_handler
+ 	.addr enmi_handler, resetstub, eirq_handler
+ 
+-.segment "CODE"
++.segment "BOOTCODE"
+ 
+ ; Jumping out of bank $00 is especially important if you're using
+ ; ROMSPEED_120NS.

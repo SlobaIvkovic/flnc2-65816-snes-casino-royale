@@ -1,0 +1,223 @@
+This patch enables support for multitap, and so up to five players.
+
+diff --git a/snes/cc65-template/crt0.s b/snes/cc65-template/crt0.s
+index 1a1cb8f..91366a8 100644
+--- a/snes/cc65-template/crt0.s
++++ b/snes/cc65-template/crt0.s
+@@ -4,7 +4,7 @@
+ .import _main, nmi_handler, __ZEROPAGE_RUN__, __BSS_SIZE__, __BSS_START__
+ .import spc_code, _spc_music_load_adr, _spc_stream_enable, _spc_dstaddr, _spc_size
+ .import spc_code2, _spc_load_data, _spc_command
+-.exportzp RAND_SEED, _oam_off
++.exportzp RAND_SEED, _oam_off, HASMULTITAP
+ .importzp PPU_MASK_VAR, _sneslib_ptr
+ .smart
+ 
+@@ -63,6 +63,7 @@ map_mode				= $00FFD5
+ 
+ RAND_SEED:	.res 2
+ _oam_off: .res 2
++HASMULTITAP: .res 1
+ 
+ .segment "BSS"
+ 
+@@ -254,6 +255,34 @@ clearram:
+ 	sta <RAND_SEED
+ 	sta <RAND_SEED+1
+ 
++	; Detect multitap
++	stz HASMULTITAP
++
++	lda #1
++	sta JOY0
++	ldx #8
++@multidetect:
++	lda JOY1
++	lsr
++	lsr
++	rol HASMULTITAP
++
++	dex
++	bne @multidetect
++
++	stz JOY0
++
++	; HASMULTITAP is now 0xff if a multitap is connected
++	lda HASMULTITAP
++	cmp #$ff
++	beq @yestap
++	lda #0
++	bra @savetap
++@yestap:
++	lda #1
++@savetap:
++	sta HASMULTITAP
++
+ 	; Normal brightness, screen off
+ 	lda #$8f
+ 	sta PPU_MASK_VAR
+diff --git a/snes/cc65-template/main.c b/snes/cc65-template/main.c
+index ab417a2..d191a2d 100644
+--- a/snes/cc65-template/main.c
++++ b/snes/cc65-template/main.c
+@@ -30,6 +30,20 @@ void main() {
+ 	vram_adr(NTADR_A(5, 10));
+ 	str("HELLO WORLD");
+ 
++	if (multitap_connected())
++		str(" WITH MULTITAP");
++
++	vram_adr(NTADR_A(3, 12));
++	str("CTRL1");
++	vram_adr(NTADR_A(3, 13));
++	str("CTRL2");
++	vram_adr(NTADR_A(3, 14));
++	str("CTRL3");
++	vram_adr(NTADR_A(3, 15));
++	str("CTRL4");
++	vram_adr(NTADR_A(3, 16));
++	str("CTRL5");
++
+ 	pal_col(0, RGB24_TO_VDPCOLOR(0x005000));
+ 	pal_col(1, RGB24_TO_VDPCOLOR(0x3fa03f));
+ 
+@@ -66,6 +80,18 @@ void main() {
+ 					(0x4000 + ('E' - ' ') * 32) / 2, 32);
+ 		}
+ 
++		// If A is pressed down on some controllers, show it
++		if (pad_state(0) & PAD_A)
++			oam_spr(8 * 8, 12 * 8, 'A' - ' ', 0, 4);
++		if (pad_state(1) & PAD_A)
++			oam_spr(8 * 8, 13 * 8, 'A' - ' ', 0, 8);
++		if (pad_state(2) & PAD_A)
++			oam_spr(8 * 8, 14 * 8, 'A' - ' ', 0, 12);
++		if (pad_state(3) & PAD_A)
++			oam_spr(8 * 8, 15 * 8, 'A' - ' ', 0, 16);
++		if (pad_state(4) & PAD_A)
++			oam_spr(8 * 8, 16 * 8, 'A' - ' ', 0, 20);
++
+ 		ppu_wait_nmi();
+ 	}
+ }
+diff --git a/snes/cc65-template/neslib.h b/snes/cc65-template/neslib.h
+index 577b8cc..6805249 100644
+--- a/snes/cc65-template/neslib.h
++++ b/snes/cc65-template/neslib.h
+@@ -93,6 +93,8 @@ unsigned int __fastcall__ pad_trigger(unsigned char pad);
+ // get previous pad state without polling ports
+ unsigned int __fastcall__ pad_state(unsigned char pad);
+ 
++// is a multitap connected in port 2?
++unsigned char __fastcall__ multitap_connected(void);
+ 
+ // set scroll
+ // it is always applied at beginning of a TV frame, not at the function call
+diff --git a/snes/cc65-template/neslib.s b/snes/cc65-template/neslib.s
+index d5e2f78..cd1a6b5 100644
+--- a/snes/cc65-template/neslib.s
++++ b/snes/cc65-template/neslib.s
+@@ -2,7 +2,7 @@
+ .smart
+ 
+ 	.import push0,popa,popax,_main,OAM_BUF
+-	.importzp RAND_SEED
++	.importzp RAND_SEED, HASMULTITAP
+ 	.exportzp PPU_MASK_VAR
+ 
+ 	.include "zeropage.inc"
+@@ -25,9 +25,9 @@ NAME_UPD_ENABLE: 	.res 1
+ PAL_UPDATE: 		.res 1
+ SCROLL_X: 		.res 1
+ SCROLL_Y: 		.res 1
+-PAD_STATE: 		.res 4		;two bytes per controller
+-PAD_STATEP: 		.res 4
+-PAD_STATET: 		.res 4
++PAD_STATE: 		.res 10		;two bytes per controller
++PAD_STATEP: 		.res 10
++PAD_STATET: 		.res 10
+ PPU_MASK_VAR: 		.res 1
+ 
+ TEMP: 			.res 11
+@@ -60,7 +60,7 @@ RLE_BYTE		=TEMP+3
+ 	.export _scroll
+ 	.export _vram_read,_vram_write,_vram_write_bank
+ 	.export _dma_queue
+-	.export _pad_trigger,_pad_state
++	.export _pad_trigger,_pad_state,_multitap_connected
+ 	.export _rand8,_rand16,_set_rand
+ 	.export _vram_adr,_vram_put,_vram_fill,_vram_inc,_vram_unrle
+ 	.export _set_vram_update,_flush_vram_update
+@@ -191,6 +191,59 @@ nmi_handler:
+ 	and PAD_STATE+3
+ 	sta PAD_STATET+3
+ 
++	lda HASMULTITAP
++	beq @skipUpd
++
++	; Read the other three controllers
++	seta16
++
++	lda PAD_STATE+4
++	sta PAD_STATEP+4
++	lda PAD_STATE+6
++	sta PAD_STATEP+6
++	lda PAD_STATE+8
++	sta PAD_STATEP+8
++
++	lda JOY2B1CUR
++	sta PAD_STATE+4
++	eor PAD_STATEP+4
++	and PAD_STATE+4
++	sta PAD_STATET+4
++
++	; controllers 4 and 5 need manual reading, autoread only does the first 3
++	ldx #0
++	stx WRIO
++
++	stz PAD_STATE+6
++	stz PAD_STATE+8
++
++	ldy #16
++@multiread:
++	lda JOY1
++
++	lsr
++	rol PAD_STATE+6
++	lsr
++	rol PAD_STATE+8
++
++	dey
++	bne @multiread
++
++	ldx #$80
++	stx WRIO
++
++	lda PAD_STATE+6
++	eor PAD_STATEP+6
++	and PAD_STATE+6
++	sta PAD_STATET+6
++
++	lda PAD_STATE+8
++	eor PAD_STATEP+8
++	and PAD_STATE+8
++	sta PAD_STATET+8
++
++	seta8
++
+ @skipUpd:
+ 
+ 	lda <SCROLL_X
+@@ -989,6 +1042,12 @@ _pad_trigger:
+ 	ldx <PAD_STATET,y
+ 	rts
+ 
++;unsigned char __fastcall__ multitap_connected(void);
++
++_multitap_connected:
++	lda HASMULTITAP
++	ldx #0
++	rts
+ 
+ 
+ ;unsigned char __fastcall__ pad_state(unsigned char pad);
